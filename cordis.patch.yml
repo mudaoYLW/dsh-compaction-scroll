@@ -1,0 +1,4 @@
+# Register a separate Web preset; never replace shipped minimal or the default.
+- insert:
+    - id: preset-minimal-notes
+      name: dsh-compaction-scroll/preset
