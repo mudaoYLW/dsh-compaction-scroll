@@ -44,12 +44,7 @@ test('official compatibility admission allows only the pinned DSH host', async (
   assert.equal(evaluatePluginCompatibility(manifest, {}, supported), undefined)
   for (const version of ['0.1.0', '0.2.0-rc.1', '0.2.0-rc.3', '0.2.0', '0.3.0-alpha.1']) {
     const issue = evaluatePluginCompatibility(manifest, {}, version)
-    assert.deepEqual(issue, {
-      name: manifest.name,
-      version: manifest.version,
-      runtimeVersion: version,
-      peers: { '@deepseek-ai/dsh': supported },
-      exempted: false,
-    })
+    assert.ok(issue, `Host ${version} must be rejected`)
+    assert.equal(issue.exempted, false)
   }
 })

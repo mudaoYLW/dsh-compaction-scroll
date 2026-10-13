@@ -34,6 +34,10 @@ dsh plugin --profile scroll-notes add github:mudaoYLW/dsh-compaction-scroll
 
 仓库地址：https://github.com/mudaoYLW/dsh-compaction-scroll 。需要固定版本时，在安装地址后追加 `#<提交 SHA>`。
 
+核心运行时依赖（Cordis、`dsh-tools`、`dsh-llm`、`dsh-system-prompt`）必须由宿主提供；本包只将它们声明为 peerDependencies，开发测试另列 devDependencies。不要为消除 profile 中的 missing-peer 提示手工安装另一份 Harness 核心包，也不要开启 profile 的自动 peer 安装。即使版本号相同，两份模块的内部 Symbol 也可能不同，导致工具调度读取 `.prepare` 失败。
+
+从旧版升级时重新 `npm pack`，不要复用旧 `.tgz`；安装新包后用 `dsh plugin --profile <你的profile> prune` 清理失去依赖的旧包。若其他插件仍直接依赖上述核心包，prune 不会删除它们，需先修正那些插件的依赖声明。确认 profile 内不再保留私有核心副本，再在安全时机重启宿主；仅刷新页面或重复“继续”无法清除进程已加载的模块。升级验收必须实际执行 shell 和笔记读写，模式可选并不代表工具可用。
+
 卸载：`dsh plugin --profile scroll-notes remove dsh-compaction-scroll`。先结束使用该模式的会话；恢复该模式的旧会话仍需要安装此包。
 
 ## 工作方式
@@ -110,5 +114,13 @@ npm test
 离线验证采用已发布 Harness 的真实 agent-loop、工具执行器、token meter 和 JSONL 持久化，仅模型输出由脚本提供，不消耗 API 额度。这不能证明 DeepSeek 在真实长任务中一定遵循交接提示。不要整体省略宿主的 optional dependencies：JSONL 文件锁等实际能力也使用平台原生包。
 
 子代理回归使用真实 preset registry、spawn provider、持久 shell、sandbox 和 approval 服务，覆盖父会话换窗后的结果回收、父子同名笔记隔离，以及前台委派结果返回。POSIX shell 场景实际读取共享工作区文件，并验证子代理继承父会话的只读覆盖、审批策略固定为 `never`、子代理换窗后权限快照仍在且写入被拒绝，原文件不变。该 shell 场景在 Windows 跳过；本地验证平台为 macOS，未据此宣称 Windows/Linux、真实模型委派质量或远端部署已验证。消息续跑、任务列表和中断另经离线 smoke 验证。
+
+发布依赖隔离回归（额外运行，默认测试不访问注册表）：
+
+```sh
+DSH_PACKED_RUNTIME=1 DSH_PACKED_HOST="$PWD" node --test test/packed-runtime.test.js
+```
+
+该命令重新打包，在独立临时 profile 安装真实 tarball，使用官方宿主解析器加载发布入口，检查核心模块与宿主身份一致，并实际执行 `bash`、`scroll_notes_write`、`scroll_notes_read`。`DSH_PACKED_HOST` 指向已有 Harness 安装所在的项目目录；省略则新建独立宿主安装。安装依赖需要注册表或完整缓存，可用 `npm_config_offline=true` 禁止联网。模型响应使用脚本，不消耗 API 额度；POSIX 场景在 Windows 跳过。
 
 本地实测可要求模型先记录一个工具结果，保存交接并换窗，随后用 `scroll_history` 找回精确原文；再重启 Harness，恢复会话读取笔记。检查它继续原任务，而不是只输出交接摘要后停止。
