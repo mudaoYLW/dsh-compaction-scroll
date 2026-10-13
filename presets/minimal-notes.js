@@ -3,7 +3,7 @@
 export const createMinimalNotesPreset = config => ({
   id: 'minimal-notes',
   name: 'Minimal Notes',
-  description: 'Minimal coding agent with durable notes, searchable history, and explicit context windows.',
+  description: 'Minimal coding agent with durable notes, explicit context windows, and background subagents.',
   order: 4,
   plugins: [
     {
@@ -20,6 +20,12 @@ Durable notes and history
 - Use scroll_notes_list({prefix}) to discover notes and scroll_notes_read({path, start_line, stop_line}) to read only the needed range. Omit optional fields when unnecessary.
 - Use scroll_history({operation: "windows"}) to locate prior context windows. Use operation "list" to page event metadata, "search" with query to find relevant evidence, and "read" with seq to retrieve the original event. Use window_id, offset, and limit when appropriate. Cite actual event seq values returned by history; never invent evidence references. Retrieve focused evidence instead of loading the entire history.
 
+Background collaboration
+- Use subagent({description, prompt}) for independent, well-scoped work. Children start with a fresh transcript and their own notes/history, inherit this mode and the current model route, and share the workspace. Give each child the goal, constraints, required evidence, and non-overlapping file ownership. Do not delegate trivial work or concurrent edits to the same files.
+- Background delegation returns a child ID, not a result. Continue your own work; completion or failure notifications arrive automatically. Use send_message({agent_id, message}) to steer or continue a child; its receipt is not an answer. When delegated work, stay within the assigned scope and return concrete results, evidence, and blockers.
+- Use list_agents({}) to discover direct children, or scope "descendants" for the subtree. Running/inactive describes activity, not success. Use interrupt_agent({agent_id}) to request interruption; it is not synchronous termination and does not stop descendants.
+- Before new_context, record outstanding child IDs, assignments, ownership, and unresolved results in your checkpoint. A context reset does not stop children. After resetting, recover their status instead of launching duplicate work; verify returned changes before claiming success.
+
 Checkpoint and context workflow
 - Before context gets tight, call get_context_remaining({}) and prepare your handoff while there is still room. Budget measurements are estimates; leave space for the checkpoint and the next tool response. A budget reminder is a request to prepare a handoff, not permission to discard context silently.
 - Keep the checkpoint in the virtual note {{scroll_checkpoint_path}}, using scroll_notes_write. It must record: the active goal; user constraints; completed and verified work (clearly separate unverified changes); precise next actions; and supporting event seqs. Include relevant paths, commands, decisions, and unresolved failures. Keep it concise and within the configured checkpoint limit (${config.maxCheckpointChars} characters).
@@ -27,7 +33,7 @@ Checkpoint and context workflow
 - After a reset, continue from the injected handoff without repeating completed work. Use note reads and targeted history reads to recover details, and verify uncertain claims against their original events. If a reset or checkpoint write fails, fix the reported problem without assuming the reset happened.
 - Do not use automatic summarization or /compact as a substitute for this explicit handoff workflow.`,
         complete: true,
-        includeRuntimeContext: false,
+        includeRuntimeContext: true,
       },
     },
     {
@@ -83,6 +89,19 @@ Checkpoint and context workflow
           },
         },
       ],
+    },
+    {
+      id: 'tool-subagent',
+      name: '@deepseek-ai/dsh-tool-subagent',
+      config: { provider: 'spawn', toolName: 'subagent', backgroundMode: 'continuable' },
+    },
+    {
+      id: 'tool-subagent-control',
+      name: '@deepseek-ai/dsh-tool-subagent-control',
+    },
+    {
+      id: 'tool-subagent-list-agents',
+      name: '@deepseek-ai/dsh-tool-subagent-control/list-agents',
     },
     {
       id: 'compaction-scroll',

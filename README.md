@@ -60,6 +60,24 @@ dsh plugin --profile scroll-notes add github:mudaoYLW/dsh-compaction-scroll
 
 这里的原文是**进入日志的工具结果**，不是进程产生过的完整 stdout。宿主 bash 工具在入日志前截断的内容不能由本插件恢复；通用 spill 外置和本插件的分页读取也不是同一种机制。
 
+### 后台子代理
+
+Minimal Notes 使用宿主原生 `spawn` continuable 子代理，额外提供四个工具，不加入 fork、workflow 或模型选择工具：
+
+| 工具 | 参数与用途 |
+| --- | --- |
+| `subagent` | `{description, prompt, run_in_background?}`，默认后台运行并返回子代理 ID；设为 `false` 等待一次性结果 |
+| `send_message` | `{agent_id, message}`，向子代理发送补充任务/指令；收到回执不代表任务完成 |
+| `interrupt_agent` | `{agent_id}`，请求中断当前执行；不是同步终止，也不停止后代 |
+| `list_agents` | `{scope?}`，查看 `children`（默认）或 `descendants`；running/inactive 不代表成功/失败 |
+
+后台完成或失败会自动通知父会话；空闲的常驻子代理可用 `send_message` 继续工作。子代理继承父会话的模式及模型路由，但**不继承父会话的聊天历史、笔记和交接**；委派提示必须自包含。文件系统仍共享，应明确文件归属，避免同时修改同一文件。权限、递归深度及并发上限沿用宿主策略，不由本插件放宽。
+
+模式保留宿主 runtime context：子代理能看到实际 sandbox/approval 策略及固定委派权限说明，换窗后仍保留当前快照。这些提示同样计入预算；子代理需要审批的操作由宿主自动拒绝，应将权限不足报告给父代理，而不是反复重试。
+
+父会话换窗不终止子代理。换窗前将未完成任务的子代理 ID、职责和待回收结果写入交接；换窗后查状态、接收结果，不要重复委派。四个工具的定义也计入上下文预算；有子代理能力不等于应当将简单任务拆开。
+
+
 ## 配置与安全边界
 
 模式注册插件 `preset-minimal-notes` 的 Config 会传给该模式的运行插件。可通过 Harness 插件配置界面调整，重新创建使用新配置的会话。自定义 Cordis composition 也可直接挂载 `dsh-compaction-scroll` 并传 Config；需要 `tools`、`sessions`、`sessionPersistence`、`sessionProjections`、`systemPrompt`、`tokenMeter` 服务以及实际 Session 写入者。
@@ -90,5 +108,7 @@ npm test
 ```
 
 离线验证采用已发布 Harness 的真实 agent-loop、工具执行器、token meter 和 JSONL 持久化，仅模型输出由脚本提供，不消耗 API 额度。这不能证明 DeepSeek 在真实长任务中一定遵循交接提示。不要整体省略宿主的 optional dependencies：JSONL 文件锁等实际能力也使用平台原生包。
+
+子代理回归使用真实 preset registry、spawn provider、持久 shell、sandbox 和 approval 服务，覆盖父会话换窗后的结果回收、父子同名笔记隔离，以及前台委派结果返回。POSIX shell 场景实际读取共享工作区文件，并验证子代理继承父会话的只读覆盖、审批策略固定为 `never`、子代理换窗后权限快照仍在且写入被拒绝，原文件不变。该 shell 场景在 Windows 跳过；本地验证平台为 macOS，未据此宣称 Windows/Linux、真实模型委派质量或远端部署已验证。消息续跑、任务列表和中断另经离线 smoke 验证。
 
 本地实测可要求模型先记录一个工具结果，保存交接并换窗，随后用 `scroll_history` 找回精确原文；再重启 Harness，恢复会话读取笔记。检查它继续原任务，而不是只输出交接摘要后停止。
