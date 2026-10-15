@@ -69,6 +69,11 @@ function consume(cache, event) {
     cache.state.pending = null
     return
   }
+  if (event.type === 'session/end-seed' && event.data.inherited === true) {
+    cache.state.lastResetSeq = event.seq
+    cache.state.pending = null
+    return
+  }
   if (event.type === 'user/message' && event.data.source?.kind === REJECTED_SOURCE
     && event.sourceEventSeqs?.includes(cache.state.pending?.seq)) {
     cache.state.pending = null
@@ -132,9 +137,13 @@ export function prepareNote(session, { path, text }, append, limits) {
   const maxNoteBytes = integer(limits.maxNoteBytes, 'maxNoteBytes', 1)
   const maxNotes = integer(limits.maxNotes, 'maxNotes', 1)
   const maxTotalNoteBytes = integer(limits.maxTotalNoteBytes, 'maxTotalNoteBytes', 1)
+  const maxCheckpointChars = integer(limits.maxCheckpointChars, 'maxCheckpointChars', 1)
   const cache = folded(session)
   const previous = cache.state.notes.get(path)
   const content = append ? (previous?.text ?? '') + text : text
+  if (path === limits.checkpointPath && content.length > maxCheckpointChars) {
+    throw new RangeError(`Checkpoint ${path} has ${content.length} characters; maxCheckpointChars allows ${maxCheckpointChars}. Move details into separate notes and keep an index plus the active goal in the checkpoint.`)
+  }
   const bytes = Buffer.byteLength(content, 'utf8')
   if (bytes > maxNoteBytes) throw new RangeError(`note exceeds maxNoteBytes (${maxNoteBytes} UTF-8 bytes)`)
   if (!previous && cache.state.notes.size >= maxNotes) {
@@ -311,9 +320,11 @@ function readHistory(event, window, offset, limit, maxOutputChars) {
  * Window IDs are checkpoint seqs, with -1 for the initial window. A checkpoint
  * belongs to the new window. list/search/windows offset and limit count items;
  * read offset and limit count UTF-16 code units of JSON.stringify(originalEvent).
- * Concatenate read.text pages to recover the exact complete event JSON. Search
- * is literal and case-sensitive over projected text/reasoning, never tool-call
- * arguments. Every returned JSON object fits maxOutputChars after serialization.
+ * Concatenate read.text pages to recover the exact complete event JSON. Known
+ * inbox events can also be read by seq, including opaque historical metadata;
+ * they do not become list/search rows. Search is literal and case-sensitive over
+ * projected text/reasoning, never tool-call arguments. Every returned JSON object
+ * fits maxOutputChars after serialization.
  */
 export function history(session, args, { maxResults, maxOutputChars }) {
   integer(maxResults, 'maxResults', 1)
@@ -339,7 +350,8 @@ export function history(session, args, { maxResults, maxOutputChars }) {
   if (operation === 'read') {
     integer(seq, 'seq')
     const event = events[seq]
-    if (!event || !HISTORY_TYPES.has(event.type)) throw new Error(`visible history event not found: ${seq}`)
+    const inboxEvent = event?.type === 'agent/inbox/spliced'
+    if (!event || (!HISTORY_TYPES.has(event.type) && !inboxEvent)) throw new Error(`visible history event not found: ${seq}`)
     const window = windows.find(window => seq >= window.start_seq && seq <= window.end_seq)
     if (selected && window !== selected) throw new Error(`event ${seq} is not in history window ${window_id}`)
     return readHistory(event, window, offset, limit, maxOutputChars)

@@ -2,17 +2,23 @@ import { referencedEvents } from './runtime-state.js'
 
 /** Sparse live references plus on-demand durable reads; no synchronous Session log APIs. */
 export function createLogReader(ctx, indexOf) {
+  const referenceTypes = new Set(['user/message', 'system/message', 'assistant/message', 'tool/result'])
   const live = new WeakMap()
   const track = session => {
     let events = live.get(session)
     if (!events) live.set(session, events = new Map())
     return events
   }
+  const retain = (session, events) => {
+    const needed = referencedEvents(indexOf(session))
+    for (const seq of events.keys()) if (!needed.has(seq)) events.delete(seq)
+    return needed
+  }
   ctx.on('session/event', (session, event) => {
     const events = live.get(session)
-    if (events && ['agent/inbox/spliced', 'user/message', 'system/message', 'assistant/message', 'tool/result'].includes(event.type)) {
-      events.set(event.seq, event)
-    }
+    if (!events || (!referenceTypes.has(event.type) && event.surfaceOp?.op !== 'replace')) return
+    const needed = retain(session, events)
+    if (needed.has(event.seq)) events.set(event.seq, event)
   }, { global: true })
 
   const flush = async session => {
@@ -37,15 +43,14 @@ export function createLogReader(ctx, indexOf) {
     const events = track(session)
     if (events.has(seq)) return events.get(seq)
     const [value] = await stored(session, seq, 1, signal)
-    events.set(seq, value)
+    if (retain(session, events).has(seq)) events.set(seq, value)
     return value
   }
   const state = async (session, signal) => {
     const index = indexOf(session)
     if (index.error) throw new Error(index.error)
     const events = track(session)
-    const needed = referencedEvents(index)
-    for (const seq of events.keys()) if (!needed.has(seq)) events.delete(seq)
+    retain(session, events)
     const notes = new Map()
     let totalBytes = 0
     for (const [path, note] of Object.entries(index.notes)) {

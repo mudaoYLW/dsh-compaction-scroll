@@ -12,7 +12,7 @@ import { createMinimalNotesPreset } from '../../presets/minimal-notes.js'
 import { resolveConfig } from '../../src/config.js'
 
 /** Exercise native preset inheritance, child lifecycle and session-scoped notes. */
-export async function subagentRuntime(respond) {
+export async function subagentRuntime(respond, config = {}, { subagents = {} } = {}) {
   const rt = await runtime(respond, { mountScroll: false, systemPrompt: { includeRuntimeContext: true } })
   try {
     let failure
@@ -26,9 +26,9 @@ export async function subagentRuntime(respond) {
     await rt.ctx.plugin(Sandbox)
     await rt.ctx.plugin(SandboxPolicy, { mode: 'workspace-write', workspaceRoot: rt.root })
     await rt.ctx.plugin(Approval, { policy: 'ask' })
-    await rt.ctx.plugin(Subagents)
+    await rt.ctx.plugin(Subagents, subagents)
     await rt.ctx.plugin(Spawn, { providerName: 'spawn' })
-    await rt.ctx.agentPresets.register(createMinimalNotesPreset(resolveConfig()))
+    await rt.ctx.agentPresets.register(createMinimalNotesPreset(resolveConfig(config)))
     const handle = await rt.ctx.agents.create({
       sessionId: 'notes-parent',
       meta: { cwd: rt.root, agentPreset: 'minimal-notes' },

@@ -1,7 +1,7 @@
 import z from '@deepseek-ai/schemastery'
 import { notePath } from './state.js'
 
-/** Limits apply per session; the working budget must fit inside the model window. */
+/** Per-session quotas; the working token budget is a soft target, not a provider limit. */
 export const Config = z.object({
   contextBudgetTokens: z.number().step(1).min(1024).default(64000),
   reminderTokens: z.number().step(1).min(1).default(8000),

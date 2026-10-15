@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { history, listNotes, prepareNote, readNote, readState } from '../src/state.js'
 
-const noteLimits = { maxNoteBytes: 64, maxNotes: 8, maxTotalNoteBytes: 128 }
+const noteLimits = { checkpointPath: 'handoff.md', maxCheckpointChars: 32, maxNoteBytes: 64, maxNotes: 8, maxTotalNoteBytes: 128 }
 const historyLimits = { maxResults: 20, maxOutputChars: 4000 }
 
 // The runtime supplies this persistence-backed view, not a host Session reader.
@@ -171,6 +171,49 @@ test('rollover remains pending until a replacement checkpoint clears it without 
   assert.equal(readState(view).notes.get('handoff.md').revision, newer.seq)
 })
 
+test('only a linked refusal settles a pending rollover, without changing notes or the active window', () => {
+  const view = logView()
+  const saved = note(view, 'handoff.md', 'keep this handoff')
+  const rollover = result(view, 'new_context', {
+    version: 1, kind: 'rollover', path: 'handoff.md', revision: saved.seq,
+  })
+  const pending = readState(view).pending
+  user(view, 'unrelated refusal', { kind: 'compaction-scroll-rejected' })
+  assert.deepEqual(readState(view).pending, pending)
+  view.append('user/message', {
+    id: 'linked-refusal', role: 'user',
+    source: { kind: 'compaction-scroll-rejected' },
+    content: [{ type: 'text', text: 'The old window is retained.' }],
+  }, { sourceEventSeqs: [rollover.seq], surfaceOp: 'append' })
+  assert.equal(readState(view).pending, null)
+  assert.equal(readState(view).lastResetSeq, -1)
+  assert.equal(readNote(view, { path: 'handoff.md' }).text, 'keep this handoff')
+  assert.deepEqual(readState(logView(view.snapshotEvents())), readState(view))
+})
+
+test('a fork inherits durable notes but not its parent pending rollover', () => {
+  const parent = logView()
+  const saved = note(parent, 'handoff.md', 'parent handoff')
+  result(parent, 'new_context', {
+    version: 1, kind: 'rollover', path: 'handoff.md', revision: saved.seq,
+  })
+  const inheritedPending = readState(parent).pending
+  const child = logView(parent.snapshotEvents())
+  child.append('session/end-seed', {})
+  assert.deepEqual(readState(child).pending, inheritedPending)
+  const cut = child.append('session/end-seed', { inherited: true })
+  assert.equal(readState(child).pending, null)
+  assert.equal(readState(child).lastResetSeq, cut.seq)
+  assert.deepEqual(readNote(child, { path: 'handoff.md' }), {
+    path: 'handoff.md', text: 'parent handoff', revision: saved.seq,
+  })
+  assert.deepEqual(readState(logView(child.snapshotEvents())), readState(child))
+  assert.deepEqual(readState(parent).pending, inheritedPending)
+  const fresh = note(child, 'handoff.md', 'child handoff')
+  assert.ok(fresh.seq > readState(child).lastResetSeq)
+  assert.equal(readNote(parent, { path: 'handoff.md' }).text, 'parent handoff')
+})
+
 test('rollover metadata must reference an existing exact note revision', () => {
   for (const revision of [0, -1, 1.5, '1', undefined]) {
     const view = logView()
@@ -203,6 +246,79 @@ test('prepareNote returns full write/append content without committing it', () =
   assert.equal(readNote(view, { path: 'dir/note' }).text, 'first')
 })
 
+test('checkpoint writes accept the exact character limit and reject excess without mutation', () => {
+  const view = logView()
+  const limits = { ...noteLimits, maxCheckpointChars: 8 }
+  const text = '🙂🙂🙂🙂'
+  const prepared = prepareNote(view, { path: limits.checkpointPath, text }, false, limits)
+  assert.equal(prepared.text, text)
+  assert.equal(view.seq, 0)
+  assert.equal(readState(view).notes.size, 0)
+  result(view, 'scroll_notes_write', prepared)
+  const previous = readState(view).notes.get(limits.checkpointPath)
+  const seq = view.seq
+  assert.throws(() => prepareNote(view, {
+    path: limits.checkpointPath, text: `${text}x`,
+  }, false, limits), RangeError)
+  assert.equal(view.seq, seq)
+  assert.strictEqual(readState(view).notes.get(limits.checkpointPath), previous)
+  assert.equal(readNote(view, { path: limits.checkpointPath }).text, text)
+
+  const empty = logView()
+  assert.throws(() => prepareNote(empty, {
+    path: limits.checkpointPath, text: '123456789',
+  }, false, limits), /has 9 characters; maxCheckpointChars allows 8/)
+  assert.equal(empty.seq, 0)
+  assert.equal(readState(empty).notes.size, 0)
+})
+
+test('checkpoint appends count the full resulting text before any mutation', () => {
+  const view = logView()
+  const limits = { ...noteLimits, maxCheckpointChars: 8 }
+  note(view, limits.checkpointPath, 'goal')
+  const original = readState(view).notes.get(limits.checkpointPath)
+  const prepared = prepareNote(view, { path: limits.checkpointPath, text: '🙂🙂' }, true, limits)
+  assert.equal(prepared.text, 'goal🙂🙂')
+  assert.strictEqual(readState(view).notes.get(limits.checkpointPath), original)
+  result(view, 'scroll_notes_append', prepared)
+  const previous = readState(view).notes.get(limits.checkpointPath)
+  const seq = view.seq
+  assert.throws(() => prepareNote(view, {
+    path: limits.checkpointPath, text: 'x',
+  }, true, limits), RangeError)
+  assert.equal(view.seq, seq)
+  assert.strictEqual(readState(view).notes.get(limits.checkpointPath), previous)
+  assert.equal(readNote(view, { path: limits.checkpointPath }).text, 'goal🙂🙂')
+})
+
+test('only the configured checkpoint has the character cap; other notes keep their byte quota', () => {
+  const view = logView()
+  const limits = { ...noteLimits, checkpointPath: 'custom/checkpoint.md', maxCheckpointChars: 8 }
+  assert.equal(prepareNote(view, {
+    path: limits.checkpointPath, text: '12345678',
+  }, false, limits).text, '12345678')
+  note(view, limits.checkpointPath, '1234')
+  assert.equal(prepareNote(view, {
+    path: limits.checkpointPath, text: '5678',
+  }, true, limits).text, '12345678')
+  for (const append of [false, true]) {
+    assert.throws(() => prepareNote(view, {
+      path: limits.checkpointPath, text: append ? '56789' : '123456789',
+    }, append, limits), /Checkpoint custom\/checkpoint\.md has 9 characters; maxCheckpointChars allows 8/)
+    assert.equal(readNote(view, { path: limits.checkpointPath }).text, '1234')
+  }
+  for (const path of ['handoff.md', 'details.md']) {
+    const text = 'x'.repeat(limits.maxNoteBytes)
+    assert.equal(prepareNote(view, { path, text }, false, limits).text, text)
+    assert.throws(() => prepareNote(view, { path, text: `${text}x` }, false, limits), /maxNoteBytes/)
+    note(view, path, '12345678')
+    assert.equal(prepareNote(view, { path, text: 'x' }, true, limits).text, '12345678x')
+    assert.throws(() => prepareNote(view, {
+      path, text: 'x'.repeat(limits.maxNoteBytes - 7),
+    }, true, limits), /maxNoteBytes/)
+  }
+})
+
 test('virtual note paths reject traversal, absolute paths and ambiguous separators', () => {
   for (const path of ['', '/', '/a', 'a/', 'a//b', '.', '..', './a', 'a/../b', 'a/./b', 'a\\b', 'C:/a', 'C:a', 'a\0b', 'a\nb', null]) {
     assert.throws(() => prepareNote(logView(), { path, text: '' }, false, noteLimits), /relative virtual note path/)
@@ -215,7 +331,7 @@ test('virtual note paths reject traversal, absolute paths and ambiguous separato
 
 test('UTF-8, note count and total budgets account for replacements and appends', () => {
   const view = logView()
-  const limits = { maxNoteBytes: 8, maxNotes: 2, maxTotalNoteBytes: 10 }
+  const limits = { ...noteLimits, maxNoteBytes: 8, maxNotes: 2, maxTotalNoteBytes: 10 }
   assert.equal(prepareNote(view, { path: 'a', text: '🙂🙂' }, false, limits).text, '🙂🙂')
   assert.throws(() => prepareNote(view, { path: 'a', text: '🙂🙂x' }, false, limits), /maxNoteBytes/)
   note(view, 'a', '123456')
@@ -438,4 +554,64 @@ test('history rejects invalid bounds, unknown windows and nonvisible event reads
   assert.deepEqual(empty.items, [])
   assert.equal(empty.next_offset, null)
   assert.equal(empty.has_more, false)
+})
+
+test('deferred inbox evidence is recoverable by original event and message index', () => {
+  const view = logView()
+  const message = {
+    id: 'deferred-child-result', role: 'user',
+    source: { kind: 'subagent-settled', senderSessionId: 'child-1' },
+    content: [{ type: 'text', text: 'original evidence 🙂\n'.repeat(80) }],
+  }
+  const event = view.append('agent/inbox/spliced', {
+    target: 'next-step', start: 0, removedCount: 0, inserted: [message],
+  })
+  let offset = 0
+  let original = ''
+  do {
+    const page = history(view, { operation: 'read', seq: event.seq, offset }, { ...historyLimits, maxOutputChars: 512 })
+    original += page.text
+    offset = page.next_offset
+  } while (offset !== null)
+  assert.deepEqual(JSON.parse(original).data.inserted[0], message)
+})
+
+test('empty inbox journal events retain exact raw evidence without becoming list or search rows', () => {
+  const view = logView()
+  const prompt = user(view, 'ordinary visible history')
+  const accepted = {
+    id: 'historical-approved-message', role: 'user',
+    source: { kind: 'agent-message', senderSessionId: 'old-child' },
+    content: [{ type: 'text', text: 'OPAQUE_ACCEPTED_EVIDENCE "\\\n🙂'.repeat(40) }],
+  }
+  const event = view.append('agent/inbox/spliced', {
+    target: 'next-step', start: 0, inserted: [],
+    compactionScroll: {
+      version: 1, kind: 'admission',
+      batch: { version: 2, accepted: [], dropped: [], messages: [accepted], humanWakeId: null },
+    },
+  })
+  const checkpoint = reset(view)
+  assert.deepEqual(history(view, { operation: 'list' }, historyLimits).items.map(item => item.seq), [
+    prompt.seq, checkpoint.seq,
+  ])
+  assert.deepEqual(history(view, { operation: 'search', query: 'OPAQUE_ACCEPTED_EVIDENCE' }, historyLimits).items, [])
+  assert.deepEqual(history(view, { operation: 'windows' }, historyLimits).items.map(item => item.event_count), [1, 1])
+  let offset = 0
+  let original = ''
+  do {
+    const page = history(view, { operation: 'read', seq: event.seq, window_id: -1, offset, limit: 37 }, {
+      ...historyLimits, maxOutputChars: 256,
+    })
+    assert.ok(JSON.stringify(page).length <= 256)
+    assert.ok(page.text.length > 0 && page.text.length <= 37)
+    original += page.text
+    offset = page.next_offset
+  } while (offset !== null)
+  assert.equal(original, JSON.stringify(event))
+  assert.deepEqual(JSON.parse(original).data.compactionScroll.batch.messages, [accepted])
+  assert.throws(() => history(view, {
+    operation: 'read', seq: event.seq, window_id: checkpoint.seq,
+  }, historyLimits), /not in history window/)
+  assert.deepEqual(readState(view), { notes: new Map(), pending: null, lastResetSeq: checkpoint.seq })
 })

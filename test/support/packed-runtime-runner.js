@@ -79,7 +79,7 @@ try {
   }
 
   const pluginURL = pathToFileURL(modulePaths[packageName]).href
-  const runtimePeers = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-tools']
+  const runtimePeers = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-scope', '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-token-meter', '@deepseek-ai/dsh-token-meter/estimate', '@deepseek-ai/dsh-tools']
   const peerPaths = {}
   for (const name of runtimePeers) {
     const hostPath = await realpath(hostRequire.resolve(name))

@@ -117,18 +117,21 @@ test('a durability failure prevents reset; recovery consumes the pending request
   } finally { await r.close() }
 })
 
-test('context budget asks for a checkpoint without destructive automatic rollover', async () => {
-  const r = await runtime(() => [text('Prepare the checkpoint next.')], {
-    config: { contextBudgetTokens: 16000, reminderTokens: 15000 },
+test('soft budget advice uses native context without forcing a rollover', async () => {
+  const r = await runtime(() => [text('Continue working.')], {
+    config: { contextBudgetTokens: 16000, reminderTokens: 8000 },
+    systemPrompt: { includeRuntimeContext: true },
   })
+  const advice = message => message.source.kind === 'runtime-context'
+    && message.source.sections?.some(section => section.name === 'compaction-scroll:budget')
   try {
     const agent = await r.create()
-    let events = await r.run(agent, 'x'.repeat(5000))
+    success(await r.run(agent, 'x'.repeat(80000)))
+    success(await r.run(agent, 'Continue.'))
+    assert.equal(r.requests.at(-1).messages.filter(advice).length, 1)
+    const events = await r.run(agent, 'Continue again.')
     success(events)
-    assert.ok(r.requests[0].messages.some(message => message.source.kind === 'compaction-scroll-reminder'))
-    events = await r.run(agent, 'Continue.')
-    success(events)
-    assert.equal(events.filter(event => event.type === 'user/message' && event.data.source.kind === 'compaction-scroll-reminder').length, 1)
+    assert.equal(events.filter(event => event.type === 'user/message' && advice(event.data)).length, 1)
     assert.equal(replacementEvents(events).length, 0)
   } finally { await r.close() }
 })

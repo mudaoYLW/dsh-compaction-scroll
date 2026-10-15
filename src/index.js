@@ -3,7 +3,7 @@ import { Config, resolveConfig } from './config.js'
 import { createLogReader } from './log.js'
 import { readState, prepareNote, readNote, listNotes, history } from './state.js'
 import { registerRuntimeState } from './runtime-state.js'
-import { createAdmission } from './admission.js'
+import { createContextWindows } from './context.js'
 
 export { Config }
 export const name = 'compaction-scroll'
@@ -16,7 +16,7 @@ const mutationOutput = {
   schema: { type: 'object', additionalProperties: true },
   render: (_args, value) => [{ type: 'text', text: value.kind === 'note'
     ? `Saved note ${JSON.stringify(value.path)} (${Buffer.byteLength(value.text)} UTF-8 bytes).`
-    : 'Checkpoint accepted. The next safe request boundary will start a new context with this handoff; continue the task there.' }],
+    : 'Context restart requested. The next safe request boundary will validate the fresh-window size before committing this handoff; continue the task after a successful reset.' }],
   presentationMeta: (_args, value) => ({ scroll: value }),
 }
 const pathParameter = { type: 'string', required: true, description: 'Session-private virtual note path, e.g. handoff.md. Not a workspace file.' }
@@ -32,7 +32,7 @@ export function apply(ctx, input = {}) {
   ctx.systemPrompt.variable('scroll_checkpoint_path', () => config.checkpointPath)
   const indexOf = registerRuntimeState(ctx)
   const log = createLogReader(ctx, indexOf)
-  const admission = createAdmission(ctx, config, log, indexOf)
+  createContextWindows(ctx, config, log, indexOf)
   const register = (definition) => ctx.tools.register(defineTool(definition))
   const sessionFor = exec => {
     if (!exec.agent || exec.parent) throw new Error('This tool requires a direct call from an agent, not a nested tool transport')
@@ -94,12 +94,20 @@ export function apply(ctx, input = {}) {
   })
   register({
     name: 'get_context_remaining',
-    description: 'Report remaining configured working-context budget, using the Harness token meter (provider usage plus estimates). This is not the model advertised maximum.',
+    description: 'Report the soft working-context target and early reminder threshold. This is advisory, not a provider context limit; normal tools remain available when the target is exceeded.',
     parameters: {}, output: textOutput,
     execute: async (_args, exec) => {
-      await logFor(exec)
-      const measurement = ctx.tokenMeter.measure(exec.agent.session)
-      return JSON.stringify({ tokens_left: Math.max(0, config.contextBudgetTokens - measurement.totalTokens), used_tokens: measurement.totalTokens, budget_tokens: config.contextBudgetTokens, baseline: measurement.baseline.kind })
+      exec.signal?.throwIfAborted()
+      const measurement = ctx.tokenMeter.measure(sessionFor(exec))
+      return JSON.stringify({
+        tokens_left: Math.max(0, config.contextBudgetTokens - measurement.totalTokens),
+        used_tokens: measurement.totalTokens,
+        budget_tokens: config.contextBudgetTokens,
+        reminder_threshold_tokens: config.contextBudgetTokens - config.reminderTokens,
+        over_budget: measurement.totalTokens > config.contextBudgetTokens,
+        soft_limit: true,
+        baseline: measurement.baseline.kind,
+      })
     },
   })
   register({
@@ -116,7 +124,6 @@ export function apply(ctx, input = {}) {
       if (calls.length !== 1 || calls[0].name !== 'new_context' || calls[0].id !== exec.callId) {
         throw new Error('new_context must be the only tool call in its assistant response; write the checkpoint in the preceding response')
       }
-      await admission.validate(exec.agent, { path: config.checkpointPath, revision: note.revision }, note, exec.signal)
       return { version: 1, kind: 'rollover', path: config.checkpointPath, revision: note.revision }
     },
   })
